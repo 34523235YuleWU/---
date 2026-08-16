@@ -73,6 +73,7 @@ class MahjongApp:
         self.back_images["small"] = tk.PhotoImage(file=asset_dir / "back_small.png")
 
     def show_login(self) -> None:
+        self.clear_root()
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("Action.TButton", padding=(14, 8), font=("Microsoft YaHei UI", 10, "bold"))
@@ -127,10 +128,9 @@ class MahjongApp:
         username = self.valid_username()
         if username is None:
             return
+        self.close_online_client()
+        self.game = MahjongGame()
         self.game.players[0].name = username
-        if self.login_frame is not None:
-            self.login_frame.destroy()
-            self.login_frame = None
         self._build_ui()
         self.status_var.set(f"欢迎，{username}。点击“新开一局”开始。")
         self.refresh()
@@ -264,7 +264,31 @@ class MahjongApp:
         self.close_online_client()
         self.root.destroy()
 
+    def return_to_start(self) -> None:
+        if self.ai_job is not None:
+            self.root.after_cancel(self.ai_job)
+            self.ai_job = None
+        self.close_online_client()
+        self.game = MahjongGame()
+        self.status_var.set("点击“新开一局”开始。")
+        self.online_room = None
+        self.online_player_id = ""
+        self.online_status_var.set("")
+        self.online_room_code_var.set("未加入房间")
+        self.online_players_var.set("")
+        self.show_login()
+
+    def clear_root(self) -> None:
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.login_frame = None
+        self.online_frame = None
+        for index in range(4):
+            self.root.columnconfigure(index, weight=0)
+            self.root.rowconfigure(index, weight=0)
+
     def _build_ui(self) -> None:
+        self.clear_root()
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("Action.TButton", padding=(14, 8), font=("Microsoft YaHei UI", 10, "bold"))
@@ -295,6 +319,7 @@ class MahjongApp:
         ).pack(side=tk.LEFT, padx=18)
         ttk.Button(toolbar, text="新开一局", style="Action.TButton", command=self.new_game).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(toolbar, text="规则", style="Action.TButton", command=self.show_rules).pack(side=tk.RIGHT)
+        ttk.Button(toolbar, text="返回开始", style="Action.TButton", command=self.return_to_start).pack(side=tk.RIGHT, padx=(0, 8))
 
         table_frame = tk.Frame(self.root, bg="#1d251f")
         table_frame.grid(row=1, column=0, sticky="nsew")
