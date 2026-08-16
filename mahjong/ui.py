@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - non-Windows fallback.
     winsound = None
 
 from .game import MahjongGame
-from .models import Suit, Tile
+from .models import Meld, Suit, Tile
 from .online import OnlineClient
 
 
@@ -285,6 +285,7 @@ class MahjongApp:
                 missing = player_state.get("missingSuit")
                 player.missing_suit = Suit(str(missing)) if missing else None
                 player.discards = [self.tile_from_dict(tile) for tile in player_state.get("discards", []) if isinstance(tile, dict)]
+                player.melds = [self.meld_from_dict(meld) for meld in player_state.get("melds", []) if isinstance(meld, dict)]
                 if index == 0:
                     player.hand = [self.tile_from_dict(tile) for tile in player_state.get("hand", []) if isinstance(tile, dict)]
                     player.sort_hand()
@@ -307,6 +308,11 @@ class MahjongApp:
 
     def tile_from_dict(self, data: dict[str, object]) -> Tile:
         return Tile(Suit(str(data.get("suit"))), int(data.get("rank", 1)), int(data.get("copy", 0)))
+
+    def meld_from_dict(self, data: dict[str, object]) -> Meld:
+        tile_data = data.get("tile")
+        tile = self.tile_from_dict(tile_data) if isinstance(tile_data, dict) else Tile(Suit.WAN, 1, 0)
+        return Meld(str(data.get("kind", "peng")), tile, bool(data.get("exposed", True)))
 
     def online_status_text(self, code: str) -> str:
         if self.game.round_over:
@@ -676,16 +682,42 @@ class MahjongApp:
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         positions = {
-            0: (width * 0.18, height - 104),
-            1: (width - 224, height * 0.70),
-            2: (width * 0.18, 144),
-            3: (92, height * 0.70),
+            0: (width * 0.16, height - 112, "horizontal"),
+            1: (width - 240, height * 0.68, "vertical"),
+            2: (width * 0.16, 138, "horizontal"),
+            3: (86, height * 0.68, "vertical"),
         }
-        for index, (x, y) in positions.items():
+        for index, (x, y, direction) in positions.items():
             for meld_index, meld in enumerate(self.game.players[index].melds):
-                mx = x + meld_index * 74
-                self.round_rect(mx, y, mx + 66, y + 28, 6, fill="#0a4638", outline="#2b8369")
-                self.canvas.create_text(mx + 33, y + 14, text=meld.label, fill=self.theme.text_light, font=("Microsoft YaHei UI", 8, "bold"))
+                if direction == "horizontal":
+                    mx = x + meld_index * 140
+                    self.draw_meld_tiles(meld, mx, y, horizontal=True)
+                else:
+                    my = y - meld_index * 70
+                    self.draw_meld_tiles(meld, x, my, horizontal=False)
+
+    def draw_meld_tiles(self, meld: Meld, x: float, y: float, horizontal: bool) -> None:
+        count = 4 if "gang" in meld.kind else 3
+        gap = 4
+        tile_w, tile_h = 30, 40
+        label = {"peng": "碰", "ming_gang": "杠", "an_gang": "暗杠"}.get(meld.kind, meld.kind)
+        if horizontal:
+            self.canvas.create_text(x + 18, y - 8, text=label, fill=self.theme.gold, font=("Microsoft YaHei UI", 8, "bold"))
+            for offset in range(count):
+                tx = x + offset * (tile_w + gap)
+                if meld.exposed:
+                    self.draw_tile_face(tx, y, tile_w, tile_h, meld.tile, small=True)
+                else:
+                    self.draw_tile_back(tx, y, tile_w, tile_h)
+            return
+
+        self.canvas.create_text(x + 24, y - 10, text=label, fill=self.theme.gold, font=("Microsoft YaHei UI", 8, "bold"))
+        for offset in range(count):
+            ty = y + offset * (tile_h + gap)
+            if meld.exposed:
+                self.draw_tile_face(x, ty, tile_w, tile_h, meld.tile, small=True)
+            else:
+                self.draw_tile_back(x, ty, tile_w, tile_h)
 
     def draw_human_hand(self) -> None:
         human = self.game.players[0]

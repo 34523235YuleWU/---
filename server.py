@@ -12,7 +12,7 @@ import websockets
 from websockets.server import WebSocketServerProtocol
 
 from mahjong.game import MahjongGame
-from mahjong.models import Suit, Tile
+from mahjong.models import Meld, Suit, Tile
 
 
 MAX_PLAYERS = 4
@@ -336,6 +336,7 @@ class MahjongLobbyServer:
                     "handCount": len(game_player.hand),
                     "hand": [self.tile_to_dict(tile) for tile in game_player.hand] if seat == viewer.seat else [],
                     "discards": [self.tile_to_dict(tile) for tile in game_player.discards],
+                    "melds": [self.meld_to_dict(meld) for meld in game_player.melds],
                     "missingSuit": game_player.missing_suit.value if game_player.missing_suit else None,
                     "score": game_player.score,
                     "won": game_player.won,
@@ -377,6 +378,9 @@ class MahjongLobbyServer:
 
     def tile_to_dict(self, tile: Tile) -> dict[str, Any]:
         return {"id": self.tile_id(tile), "suit": tile.suit.value, "rank": tile.rank, "copy": tile.copy}
+
+    def meld_to_dict(self, meld: Meld) -> dict[str, Any]:
+        return {"kind": meld.kind, "tile": self.tile_to_dict(meld.tile), "exposed": meld.exposed}
 
 
 async def process_request(path: str, _headers: Any) -> tuple[HTTPStatus, list[tuple[str, str]], bytes] | None:
