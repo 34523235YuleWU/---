@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 from .game import MahjongGame
 from .models import Suit, Tile
+from .online import OnlineClient
 
 
 @dataclass(frozen=True)
@@ -36,13 +37,23 @@ class MahjongApp:
         self.root.minsize(1040, 700)
         self.status_var = tk.StringVar(value="点击“新开一局”开始。")
         self.username_var = tk.StringVar(value="")
+        self.server_url_var = tk.StringVar(value="wss://yulewu-de-ma-jiang.onrender.com")
+        self.room_code_var = tk.StringVar(value="")
         self.login_frame: tk.Frame | None = None
+        self.online_frame: tk.Frame | None = None
+        self.online_status_var = tk.StringVar(value="")
+        self.online_room_code_var = tk.StringVar(value="未加入房间")
+        self.online_players_var = tk.StringVar(value="")
+        self.online_client: OnlineClient | None = None
+        self.online_player_id = ""
+        self.online_room: dict[str, object] | None = None
         self.action_buttons: dict[str, ttk.Button] = {}
         self.missing_buttons: dict[Suit, ttk.Button] = {}
         self.tile_images: dict[tuple[str, str | int, str, bool], tk.PhotoImage] = {}
         self.back_images: dict[str, tk.PhotoImage] = {}
         self.ai_job: str | None = None
         self.load_tile_images()
+        self.root.protocol("WM_DELETE_WINDOW", self.close_app)
         self.show_login()
 
     def run(self) -> None:
@@ -78,25 +89,43 @@ class MahjongApp:
         card = tk.Frame(self.login_frame, bg="#f2e6ce", padx=34, pady=30)
         card.grid(row=0, column=0)
         tk.Label(card, text="单机川麻", bg="#f2e6ce", fg="#17221d", font=("Microsoft YaHei UI", 26, "bold")).pack(anchor=tk.W)
-        tk.Label(card, text="创建角色后进入牌桌", bg="#f2e6ce", fg="#5a604f", font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=(4, 24))
+        tk.Label(card, text="创建角色，选择单机或联机", bg="#f2e6ce", fg="#5a604f", font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=(4, 24))
 
         tk.Label(card, text="用户名", bg="#f2e6ce", fg="#1f251f", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W)
         name_entry = ttk.Entry(card, textvariable=self.username_var, width=28, font=("Microsoft YaHei UI", 12))
         name_entry.pack(fill=tk.X, pady=(6, 14))
-        name_entry.bind("<Return>", lambda _event: self.create_role())
-        ttk.Button(card, text="创建角色并进入", style="Action.TButton", command=self.create_role).pack(fill=tk.X)
+        name_entry.bind("<Return>", lambda _event: self.create_single_player_role())
 
-        tips = "进入后先点“新开一局”，再定缺、摸牌、出牌。"
+        ttk.Button(card, text="单机进入", style="Action.TButton", command=self.create_single_player_role).pack(fill=tk.X, pady=(0, 14))
+
+        tk.Label(card, text="联机服务器", bg="#f2e6ce", fg="#1f251f", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W)
+        ttk.Entry(card, textvariable=self.server_url_var, width=36, font=("Microsoft YaHei UI", 10)).pack(fill=tk.X, pady=(6, 10))
+
+        online_buttons = tk.Frame(card, bg="#f2e6ce")
+        online_buttons.pack(fill=tk.X)
+        ttk.Button(online_buttons, text="创建联机房间", command=self.create_online_room).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(online_buttons, text="加入房间", command=self.join_online_room).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        tk.Label(card, text="房间号", bg="#f2e6ce", fg="#1f251f", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, pady=(14, 0))
+        ttk.Entry(card, textvariable=self.room_code_var, width=20, font=("Microsoft YaHei UI", 12)).pack(fill=tk.X, pady=(6, 0))
+
+        tips = "联机创建后，把房间号发给朋友；开始时空位会自动补 AI。"
         tk.Label(card, text=tips, bg="#f2e6ce", fg="#6d634f", font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(18, 0))
         name_entry.focus_set()
 
-    def create_role(self) -> None:
+    def valid_username(self) -> str | None:
         username = self.username_var.get().strip()
         if not username:
             messagebox.showwarning("需要用户名", "请先输入一个用户名。")
-            return
+            return None
         if len(username) > 10:
             messagebox.showwarning("名字太长", "用户名最多 10 个字。")
+            return None
+        return username
+
+    def create_single_player_role(self) -> None:
+        username = self.valid_username()
+        if username is None:
             return
         self.game.players[0].name = username
         if self.login_frame is not None:
@@ -105,6 +134,135 @@ class MahjongApp:
         self._build_ui()
         self.status_var.set(f"欢迎，{username}。点击“新开一局”开始。")
         self.refresh()
+
+    def create_online_room(self) -> None:
+        username = self.valid_username()
+        if username is None:
+            return
+        self.connect_online("create_room", {"username": username})
+
+    def join_online_room(self) -> None:
+        username = self.valid_username()
+        if username is None:
+            return
+        code = self.room_code_var.get().strip().upper()
+        if not code:
+            messagebox.showwarning("需要房间号", "请输入朋友发给你的房间号。")
+            return
+        self.connect_online("join_room", {"username": username, "code": code})
+
+    def connect_online(self, action: str, data: dict[str, str]) -> None:
+        url = self.server_url_var.get().strip()
+        if not url.startswith(("ws://", "wss://")):
+            messagebox.showwarning("服务器地址不对", "联机服务器地址需要以 ws:// 或 wss:// 开头。")
+            return
+        self.close_online_client()
+        try:
+            self.online_client = OnlineClient(url, action, data, self.queue_online_event, self.queue_online_error)
+        except RuntimeError as exc:
+            messagebox.showerror("缺少联机依赖", str(exc))
+            return
+        self.online_status_var.set("正在连接服务器...")
+        self.show_online_lobby()
+        self.online_client.start()
+
+    def show_online_lobby(self) -> None:
+        if self.login_frame is not None:
+            self.login_frame.destroy()
+            self.login_frame = None
+
+        self.root.configure(bg="#17221d")
+        self.online_frame = tk.Frame(self.root, bg="#17221d")
+        self.online_frame.grid(row=0, column=0, sticky="nsew")
+        self.online_frame.columnconfigure(0, weight=1)
+        self.online_frame.rowconfigure(0, weight=1)
+
+        card = tk.Frame(self.online_frame, bg="#f2e6ce", padx=34, pady=30)
+        card.grid(row=0, column=0)
+        tk.Label(card, text="联机房间", bg="#f2e6ce", fg="#17221d", font=("Microsoft YaHei UI", 24, "bold")).pack(anchor=tk.W)
+        tk.Label(card, textvariable=self.online_status_var, bg="#f2e6ce", fg="#5a604f", font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(4, 18))
+        tk.Label(card, textvariable=self.online_room_code_var, bg="#f2e6ce", fg="#7a251f", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor=tk.W)
+        tk.Label(card, text="玩家列表", bg="#f2e6ce", fg="#1f251f", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, pady=(20, 6))
+        tk.Label(card, textvariable=self.online_players_var, bg="#fff8e8", fg="#263028", justify=tk.LEFT, width=34, height=8, anchor=tk.NW, padx=10, pady=10).pack(fill=tk.X)
+        ttk.Button(card, text="开始游戏", style="Action.TButton", command=self.start_online_game).pack(fill=tk.X, pady=(18, 8))
+        ttk.Button(card, text="返回登录", command=self.leave_online_lobby).pack(fill=tk.X)
+
+    def queue_online_event(self, event: str, data: dict[str, object]) -> None:
+        self.root.after(0, lambda: self.handle_online_event(event, data))
+
+    def queue_online_error(self, message: str) -> None:
+        self.root.after(0, lambda: self.handle_online_error(message))
+
+    def handle_online_event(self, event: str, data: dict[str, object]) -> None:
+        if event == "hello":
+            self.online_player_id = str(data.get("playerId", ""))
+            self.online_status_var.set("已连接服务器。")
+            return
+        if event in {"room_created", "room_joined", "room_state"}:
+            if "playerId" in data:
+                self.online_player_id = str(data.get("playerId"))
+            room = data.get("room")
+            if isinstance(room, dict):
+                self.online_room = room
+                self.refresh_online_room()
+            return
+        if event == "game_started":
+            room = data.get("room")
+            if isinstance(room, dict):
+                self.online_room = room
+                self.refresh_online_room()
+            self.online_status_var.set("房间已开始。当前版本已连通大厅，牌局同步是下一步。")
+            return
+        if event == "error":
+            self.handle_online_error(str(data.get("message", "服务器返回错误。")))
+
+    def handle_online_error(self, message: str) -> None:
+        self.online_status_var.set(message)
+        messagebox.showerror("联机错误", message)
+
+    def refresh_online_room(self) -> None:
+        if self.online_room is None:
+            return
+        code = str(self.online_room.get("code", ""))
+        self.online_room_code_var.set(f"房间号：{code}")
+        players = self.online_room.get("players", [])
+        lines: list[str] = []
+        if isinstance(players, list):
+            for player in players:
+                if not isinstance(player, dict):
+                    continue
+                seat = int(player.get("seat", 0)) + 1
+                name = str(player.get("username", "玩家"))
+                marks = []
+                if player.get("isHost"):
+                    marks.append("房主")
+                if player.get("isAi"):
+                    marks.append("AI")
+                suffix = f"（{'，'.join(marks)}）" if marks else ""
+                lines.append(f"{seat}号位  {name}{suffix}")
+        self.online_players_var.set("\n".join(lines) or "等待玩家加入...")
+        self.online_status_var.set("把房间号发给朋友，房主可以开始游戏。")
+
+    def start_online_game(self) -> None:
+        if self.online_client is None:
+            return
+        self.online_client.send("start_game", {})
+
+    def leave_online_lobby(self) -> None:
+        self.close_online_client()
+        if self.online_frame is not None:
+            self.online_frame.destroy()
+            self.online_frame = None
+        self.show_login()
+
+    def close_online_client(self) -> None:
+        if self.online_client is not None:
+            self.online_client.close()
+            self.online_client = None
+
+    def close_app(self) -> None:
+        self.close_online_client()
+        self.root.destroy()
 
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)

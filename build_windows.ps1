@@ -10,6 +10,9 @@ if ($hasPyInstaller.Trim() -ne "True") {
     python -m pip install pyinstaller
 }
 
+Write-Host "Installing app dependencies..."
+python -m pip install -r requirements.txt
+
 Write-Host "Cleaning old build output..."
 if (Test-Path -LiteralPath "build") {
     Remove-Item -LiteralPath "build" -Recurse -Force

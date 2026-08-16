@@ -16,6 +16,12 @@ py main.py
 
 启动后先输入用户名创建角色，然后进入牌桌。
 
+联机模式可以使用当前 Render 服务器地址：
+
+```text
+wss://yulewu-de-ma-jiang.onrender.com
+```
+
 ## Windows 打包
 
 运行：
@@ -39,6 +45,7 @@ dist\SichuanMahjong\SichuanMahjong.exe
 - `mahjong.rules.SichuanRules`：川麻规则对象，负责定缺建议、胡牌检测、碰杠、番型判断。
 - `mahjong.game.MahjongGame`：牌局对象，负责发牌、回合推进、AI、计分和血战到底流程。
 - `mahjong.ui.MahjongApp`：桌面界面对象，负责登录页、牌桌展示和按钮交互。
+- `mahjong.online.OnlineClient`：联机客户端，负责连接 WebSocket 房间服务器。
 - `server.py`：联机房间服务器，负责创建房间、加入房间和广播动作，部署到 Render 时使用。
 
 界面使用 Canvas 绘制：四个座位围绕方形牌桌、中央牌墙、骰子、庄家、弃牌区、副露区、对手背面手牌和底部可点击图片手牌。

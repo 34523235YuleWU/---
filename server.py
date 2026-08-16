@@ -231,6 +231,9 @@ class MahjongLobbyServer:
 
 
 async def process_request(path: str, _headers: Any) -> tuple[HTTPStatus, list[tuple[str, str]], bytes] | None:
+    upgrade = str(_headers.get("Upgrade", "")).lower()
+    if upgrade == "websocket":
+        return None
     if path in {"/", "/health"}:
         body = "Sichuan Mahjong WebSocket server is running.\n".encode("utf-8")
         return HTTPStatus.OK, [("Content-Type", "text/plain; charset=utf-8")], body
