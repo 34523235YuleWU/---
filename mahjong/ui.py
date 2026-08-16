@@ -211,7 +211,7 @@ class MahjongApp:
             if isinstance(room, dict):
                 self.online_room = room
                 self.refresh_online_room()
-            self.online_status_var.set("房间已开始。当前版本已连通大厅，牌局同步是下一步。")
+            self.enter_online_table()
             return
         if event == "error":
             self.handle_online_error(str(data.get("message", "服务器返回错误。")))
@@ -247,6 +247,33 @@ class MahjongApp:
         if self.online_client is None:
             return
         self.online_client.send("start_game", {})
+
+    def enter_online_table(self) -> None:
+        if self.online_room is None:
+            return
+        self.game = MahjongGame()
+        self.game.start()
+        self.apply_online_players_to_table()
+        self._build_ui()
+        code = str(self.online_room.get("code", ""))
+        self.status_var.set(f"联机房间 {code} 已开始。当前牌桌已进入，牌局动作同步下一步接入。")
+        self.refresh()
+
+    def apply_online_players_to_table(self) -> None:
+        if self.online_room is None:
+            return
+        players = self.online_room.get("players", [])
+        if not isinstance(players, list):
+            return
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+            seat = int(player.get("seat", 0))
+            if 0 <= seat < len(self.game.players):
+                name = str(player.get("username", "玩家"))
+                if player.get("isAi"):
+                    name = f"{name}"
+                self.game.players[seat].name = name
 
     def leave_online_lobby(self) -> None:
         self.close_online_client()
