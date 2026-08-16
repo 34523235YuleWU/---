@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+try:
+    import winsound
+except ImportError:  # pragma: no cover - non-Windows fallback.
+    winsound = None
+
 from .game import MahjongGame
 from .models import Suit, Tile
 from .online import OnlineClient
@@ -51,6 +56,7 @@ class MahjongApp:
         self.missing_buttons: dict[Suit, ttk.Button] = {}
         self.tile_images: dict[tuple[str, str | int, str, bool], tk.PhotoImage] = {}
         self.back_images: dict[str, tk.PhotoImage] = {}
+        self.discard_sound_path = Path(__file__).resolve().parents[1] / "assets" / "sounds" / "discard.wav"
         self.ai_job: str | None = None
         self.load_tile_images()
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
@@ -440,6 +446,7 @@ class MahjongApp:
             self.status_var.set(str(exc))
             self.refresh()
             return
+        self.play_discard_sound()
         self.continue_after_user_action()
 
     def human_hu(self) -> None:
@@ -473,11 +480,23 @@ class MahjongApp:
 
     def run_ai_step(self) -> None:
         self.ai_job = None
+        discard_count = self.total_discard_count()
         acted = self.game.run_one_ai_action()
         if acted:
+            if self.total_discard_count() > discard_count:
+                self.play_discard_sound()
             self.update_status_after_turn()
             self.refresh()
         self.schedule_ai()
+
+    def total_discard_count(self) -> int:
+        return sum(len(player.discards) for player in self.game.players)
+
+    def play_discard_sound(self) -> None:
+        if winsound is None or not self.discard_sound_path.exists():
+            self.root.bell()
+            return
+        winsound.PlaySound(str(self.discard_sound_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
 
     def update_status_after_turn(self) -> None:
         if self.game.round_over:
