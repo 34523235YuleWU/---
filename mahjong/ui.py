@@ -52,6 +52,9 @@ class MahjongApp:
         self.online_client: OnlineClient | None = None
         self.online_player_id = ""
         self.online_room: dict[str, object] | None = None
+        self.online_in_game = False
+        self.online_needs_draw = False
+        self.online_wall_count: int | None = None
         self.action_buttons: dict[str, ttk.Button] = {}
         self.missing_buttons: dict[Suit, ttk.Button] = {}
         self.tile_images: dict[tuple[str, str | int, str, bool], tk.PhotoImage] = {}
@@ -217,7 +220,9 @@ class MahjongApp:
             if isinstance(room, dict):
                 self.online_room = room
                 self.refresh_online_room()
-            self.enter_online_table()
+            return
+        if event == "game_state":
+            self.apply_online_game_state(data)
             return
         if event == "error":
             self.handle_online_error(str(data.get("message", "服务器返回错误。")))
@@ -254,32 +259,65 @@ class MahjongApp:
             return
         self.online_client.send("start_game", {})
 
-    def enter_online_table(self) -> None:
-        if self.online_room is None:
-            return
-        self.game = MahjongGame()
-        self.game.start()
-        self.apply_online_players_to_table()
-        self._build_ui()
-        code = str(self.online_room.get("code", ""))
-        self.status_var.set(f"联机房间 {code} 已开始。当前牌桌已进入，牌局动作同步下一步接入。")
+    def apply_online_game_state(self, state: dict[str, object]) -> None:
+        first_state = not self.online_in_game
+        self.online_in_game = True
+        self.online_needs_draw = bool(state.get("needsDraw"))
+        self.online_wall_count = int(state.get("wallCount", 0))
+        self.game.round_over = bool(state.get("roundOver"))
+        self.game.current_index = int(state.get("currentRelative", 0))
+        self.game.dealer_index = int(state.get("dealerRelative", 0))
+        dice = state.get("dice", [1, 1])
+        if isinstance(dice, list) and len(dice) == 2:
+            self.game.dice = (int(dice[0]), int(dice[1]))
+        self.game.wall = [Tile(Suit.WAN, 1, 0)] * self.online_wall_count
+        self.game.log = [str(item) for item in state.get("log", [])] if isinstance(state.get("log"), list) else []
+
+        players = state.get("players", [])
+        if isinstance(players, list):
+            for index, player_state in enumerate(players[:4]):
+                if not isinstance(player_state, dict):
+                    continue
+                player = self.game.players[index]
+                player.name = str(player_state.get("username", "玩家"))
+                player.score = int(player_state.get("score", 0))
+                player.won = bool(player_state.get("won"))
+                missing = player_state.get("missingSuit")
+                player.missing_suit = Suit(str(missing)) if missing else None
+                player.discards = [self.tile_from_dict(tile) for tile in player_state.get("discards", []) if isinstance(tile, dict)]
+                if index == 0:
+                    player.hand = [self.tile_from_dict(tile) for tile in player_state.get("hand", []) if isinstance(tile, dict)]
+                    player.sort_hand()
+                else:
+                    count = int(player_state.get("handCount", 0))
+                    player.hand = [Tile(Suit.WAN, 1, copy) for copy in range(count)]
+
+        last = state.get("lastDiscard")
+        self.game.last_discard = self.tile_from_dict(last) if isinstance(last, dict) else None
+
+        if first_state:
+            self._build_ui()
+        room = state.get("room")
+        code = ""
+        if isinstance(room, dict):
+            self.online_room = room
+            code = str(room.get("code", ""))
+        self.status_var.set(self.online_status_text(code))
         self.refresh()
 
-    def apply_online_players_to_table(self) -> None:
-        if self.online_room is None:
-            return
-        players = self.online_room.get("players", [])
-        if not isinstance(players, list):
-            return
-        for player in players:
-            if not isinstance(player, dict):
-                continue
-            seat = int(player.get("seat", 0))
-            if 0 <= seat < len(self.game.players):
-                name = str(player.get("username", "玩家"))
-                if player.get("isAi"):
-                    name = f"{name}"
-                self.game.players[seat].name = name
+    def tile_from_dict(self, data: dict[str, object]) -> Tile:
+        return Tile(Suit(str(data.get("suit"))), int(data.get("rank", 1)), int(data.get("copy", 0)))
+
+    def online_status_text(self, code: str) -> str:
+        if self.game.round_over:
+            return f"联机房间 {code} 本局结束。"
+        if self.game.current_index != 0:
+            return f"联机房间 {code}：等待 {self.game.players[self.game.current_index].name} 操作。"
+        if self.game.players[0].missing_suit is None:
+            return f"联机房间 {code}：请选择定缺。"
+        if self.online_needs_draw:
+            return f"联机房间 {code}：轮到你摸牌。"
+        return f"联机房间 {code}：轮到你出牌。"
 
     def leave_online_lobby(self) -> None:
         self.close_online_client()
@@ -304,6 +342,9 @@ class MahjongApp:
         self.close_online_client()
         self.game = MahjongGame()
         self.status_var.set("点击“新开一局”开始。")
+        self.online_in_game = False
+        self.online_needs_draw = False
+        self.online_wall_count = None
         self.online_room = None
         self.online_player_id = ""
         self.online_status_var.set("")
@@ -412,6 +453,9 @@ class MahjongApp:
         self.refresh()
 
     def new_game(self) -> None:
+        if self.online_in_game:
+            self.status_var.set("联机房间由服务器发牌，不能本地新开一局。")
+            return
         if self.ai_job is not None:
             self.root.after_cancel(self.ai_job)
             self.ai_job = None
@@ -420,12 +464,20 @@ class MahjongApp:
         self.refresh()
 
     def set_missing(self, suit: Suit) -> None:
+        if self.online_in_game:
+            if self.online_client is not None:
+                self.online_client.send("game_action", {"type": "set_missing", "suit": suit.value})
+            return
         if self.game.round_over:
             return
         self.game.set_human_missing_suit(suit)
         self.continue_after_user_action()
 
     def human_draw(self) -> None:
+        if self.online_in_game:
+            if self.online_client is not None:
+                self.online_client.send("game_action", {"type": "draw"})
+            return
         tile = self.game.human_draw()
         if tile is None:
             self.status_var.set("现在不能摸牌。")
@@ -434,6 +486,10 @@ class MahjongApp:
         self.refresh()
 
     def discard_tile(self, tile: Tile) -> None:
+        if self.online_in_game:
+            if self.online_client is not None:
+                self.online_client.send("game_action", {"type": "discard", "tile": self.tile_id(tile)})
+            return
         if self.game.players[0].missing_suit is None:
             self.status_var.set("请先定缺。")
             return
@@ -491,6 +547,9 @@ class MahjongApp:
 
     def total_discard_count(self) -> int:
         return sum(len(player.discards) for player in self.game.players)
+
+    def tile_id(self, tile: Tile) -> str:
+        return f"{tile.suit.value}-{tile.rank}-{tile.copy}"
 
     def play_discard_sound(self) -> None:
         if winsound is None or not self.discard_sound_path.exists():
@@ -738,6 +797,15 @@ class MahjongApp:
     def refresh_actions(self) -> None:
         claim = self.game.pending_claim
         human = self.game.players[0]
+        if self.online_in_game:
+            is_my_turn = self.game.current_index == 0 and not self.game.round_over
+            can_draw = is_my_turn and self.online_needs_draw
+            self.action_buttons["draw"].configure(state=tk.NORMAL if can_draw else tk.DISABLED)
+            self.action_buttons["hu"].configure(state=tk.DISABLED)
+            self.action_buttons["peng"].configure(state=tk.DISABLED)
+            self.action_buttons["gang"].configure(state=tk.DISABLED)
+            self.action_buttons["pass"].configure(state=tk.DISABLED)
+            return
         can_draw = self.game.human_needs_draw()
         can_self_hu = (
             not self.game.round_over
@@ -765,6 +833,8 @@ class MahjongApp:
         human = self.game.players[0]
         for suit, button in self.missing_buttons.items():
             enabled = not self.game.round_over and human.missing_suit is None
+            if self.online_in_game:
+                enabled = enabled and self.game.current_index == 0
             text = f"缺{suit.label}"
             if human.missing_suit is suit:
                 text = f"已缺{suit.label}"

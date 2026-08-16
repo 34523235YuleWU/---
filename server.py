@@ -11,6 +11,9 @@ from typing import Any
 import websockets
 from websockets.server import WebSocketServerProtocol
 
+from mahjong.game import MahjongGame
+from mahjong.models import Suit, Tile
+
 
 MAX_PLAYERS = 4
 
@@ -30,6 +33,7 @@ class Room:
     host_id: str
     players: dict[str, OnlinePlayer] = field(default_factory=dict)
     started: bool = False
+    game: MahjongGame | None = None
     event_log: list[dict[str, Any]] = field(default_factory=list)
 
     def public_state(self) -> dict[str, Any]:
@@ -86,7 +90,7 @@ class MahjongLobbyServer:
         elif action == "start_game":
             await self.start_game(websocket, player_id)
         elif action == "game_action":
-            await self.forward_game_action(websocket, player_id, data)
+            await self.apply_game_action(websocket, player_id, data)
         else:
             await self.send_error(websocket, f"未知动作：{action}")
 
@@ -132,18 +136,55 @@ class MahjongLobbyServer:
             return
         self.fill_ai_players(room)
         room.started = True
+        room.game = MahjongGame()
+        room.game.start()
+        self.apply_room_players_to_game(room)
+        self.prepare_ai_missing_suits(room)
         await self.broadcast(room, "game_started", {"room": room.public_state()})
+        await self.run_ai_until_human_turn(room)
+        await self.broadcast_game_state(room)
 
-    async def forward_game_action(self, websocket: WebSocketServerProtocol, player_id: str, data: dict[str, Any]) -> None:
+    async def apply_game_action(self, websocket: WebSocketServerProtocol, player_id: str, data: dict[str, Any]) -> None:
         room = self.room_for_player(player_id)
-        if room is None:
+        if room is None or room.game is None:
             await self.send_error(websocket, "你还没有加入房间。")
             return
         player = room.players[player_id]
-        event = {"playerId": player_id, "seat": player.seat, "username": player.username, "action": data}
-        room.event_log.append(event)
-        del room.event_log[:-80]
-        await self.broadcast(room, "game_action", event)
+        game = room.game
+        action_type = str(data.get("type", ""))
+
+        try:
+            if action_type == "set_missing":
+                suit = Suit(str(data.get("suit")))
+                game.players[player.seat].missing_suit = suit
+                game.add_log(f"{player.username}定缺{suit.label}。")
+            elif action_type == "draw":
+                if not self.seat_needs_draw(game, player.seat):
+                    await self.send_error(websocket, "现在不能摸牌。")
+                    return
+                game.draw_for(player.seat)
+                game.add_log(f"{player.username}摸牌。")
+            elif action_type == "discard":
+                if game.current_index != player.seat:
+                    await self.send_error(websocket, "还没轮到你出牌。")
+                    return
+                if self.seat_needs_draw(game, player.seat):
+                    await self.send_error(websocket, "请先摸牌。")
+                    return
+                tile = self.find_tile(game.players[player.seat].hand, str(data.get("tile")))
+                if tile is None:
+                    await self.send_error(websocket, "这张牌不在你的手牌里。")
+                    return
+                game.discard(player.seat, tile)
+            else:
+                await self.send_error(websocket, f"未知游戏动作：{action_type}")
+                return
+        except ValueError as exc:
+            await self.send_error(websocket, str(exc))
+            return
+
+        await self.run_ai_until_human_turn(room)
+        await self.broadcast_game_state(room)
 
     async def disconnect(self, player_id: str) -> None:
         code = self.player_room.pop(player_id, None)
@@ -169,6 +210,20 @@ class MahjongLobbyServer:
 
     async def broadcast_room_state(self, room: Room) -> None:
         await self.broadcast(room, "room_state", {"room": room.public_state()})
+
+    async def broadcast_game_state(self, room: Room) -> None:
+        if room.game is None:
+            return
+        stale_players: list[str] = []
+        for player in list(room.players.values()):
+            if player.websocket is None:
+                continue
+            try:
+                await self.send(player.websocket, "game_state", self.personal_game_state(room, player))
+            except websockets.ConnectionClosed:
+                stale_players.append(player.player_id)
+        for player_id in stale_players:
+            await self.disconnect(player_id)
 
     async def broadcast(self, room: Room, event: str, data: dict[str, Any]) -> None:
         stale_players: list[str] = []
@@ -228,6 +283,100 @@ class MahjongLobbyServer:
         for player_id, player in list(room.players.items()):
             if player.is_ai:
                 room.players.pop(player_id)
+
+    def apply_room_players_to_game(self, room: Room) -> None:
+        if room.game is None:
+            return
+        for player in room.players.values():
+            room.game.players[player.seat].name = player.username
+
+    def prepare_ai_missing_suits(self, room: Room) -> None:
+        if room.game is None:
+            return
+        for player in room.players.values():
+            game_player = room.game.players[player.seat]
+            if player.is_ai and game_player.missing_suit is None:
+                game_player.missing_suit = room.game.rules.choose_missing_suit(game_player)
+
+    async def run_ai_until_human_turn(self, room: Room) -> None:
+        if room.game is None:
+            return
+        while not room.game.round_over:
+            current = self.player_for_seat(room, room.game.current_index)
+            if current is None or not current.is_ai:
+                break
+            game_player = room.game.players[current.seat]
+            if game_player.missing_suit is None:
+                game_player.missing_suit = room.game.rules.choose_missing_suit(game_player)
+                room.game.add_log(f"{current.username}定缺{game_player.missing_suit.label}。")
+                continue
+            if len(game_player.hand) % 3 == 1:
+                room.game.draw_for(current.seat)
+                room.game.add_log(f"{current.username}摸牌。")
+                continue
+            tile = room.game.choose_ai_discard(game_player)
+            room.game.discard(current.seat, tile)
+            if room.game.pending_claim is not None:
+                room.game.pending_claim = None
+
+    def personal_game_state(self, room: Room, viewer: OnlinePlayer) -> dict[str, Any]:
+        game = room.game
+        assert game is not None
+        relative_players = []
+        for offset in range(MAX_PLAYERS):
+            seat = (viewer.seat + offset) % MAX_PLAYERS
+            room_player = self.player_for_seat(room, seat)
+            game_player = game.players[seat]
+            relative_players.append(
+                {
+                    "seat": seat,
+                    "relative": offset,
+                    "username": room_player.username if room_player else game_player.name,
+                    "isAi": bool(room_player and room_player.is_ai),
+                    "handCount": len(game_player.hand),
+                    "hand": [self.tile_to_dict(tile) for tile in game_player.hand] if seat == viewer.seat else [],
+                    "discards": [self.tile_to_dict(tile) for tile in game_player.discards],
+                    "missingSuit": game_player.missing_suit.value if game_player.missing_suit else None,
+                    "score": game_player.score,
+                    "won": game_player.won,
+                }
+            )
+        return {
+            "room": room.public_state(),
+            "selfSeat": viewer.seat,
+            "players": relative_players,
+            "wallCount": len(game.wall),
+            "currentRelative": (game.current_index - viewer.seat) % MAX_PLAYERS,
+            "dealerRelative": (game.dealer_index - viewer.seat) % MAX_PLAYERS,
+            "dice": list(game.dice),
+            "lastDiscard": self.tile_to_dict(game.last_discard) if game.last_discard else None,
+            "log": list(game.log[:20]),
+            "roundOver": game.round_over,
+            "needsDraw": self.seat_needs_draw(game, viewer.seat),
+        }
+
+    def player_for_seat(self, room: Room, seat: int) -> OnlinePlayer | None:
+        return next((player for player in room.players.values() if player.seat == seat), None)
+
+    def seat_needs_draw(self, game: MahjongGame, seat: int) -> bool:
+        player = game.players[seat]
+        return (
+            not game.round_over
+            and game.current_index == seat
+            and game.pending_claim is None
+            and player.missing_suit is not None
+            and not player.won
+            and len(player.hand) % 3 == 1
+        )
+
+    def find_tile(self, hand: list[Tile], tile_id: str) -> Tile | None:
+        return next((tile for tile in hand if self.tile_id(tile) == tile_id), None)
+
+    def tile_id(self, tile: Tile) -> str:
+        return f"{tile.suit.value}-{tile.rank}-{tile.copy}"
+
+    def tile_to_dict(self, tile: Tile) -> dict[str, Any]:
+        return {"id": self.tile_id(tile), "suit": tile.suit.value, "rank": tile.rank, "copy": tile.copy}
 
 
 async def process_request(path: str, _headers: Any) -> tuple[HTTPStatus, list[tuple[str, str]], bytes] | None:
